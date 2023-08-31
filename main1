@@ -167,9 +167,21 @@ class ParticleFilter:
         ####################
         ## YOUR CODE HERE ##
         ####################
-
-
-
+        # Initialize particles
+        for _ in range(self.num_particles_):
+            x = random_uniform(self.map_x_min_, self.map_x_max_)
+            y = random_uniform(self.map_y_min_, self.map_y_max_)
+            theta = random_uniform(0.0, 2 * math.pi)
+            weight = 1.0 / self.num_particles_
+            particle = Particle(x, y, theta, weight)
+            self.particles_.append(particle)
+    
+        # Don't use the estimated pose just after initialization
+        self.estimated_pose_valid_ = False
+    
+        # Induce a sensing update
+        self.motion_update_count_ = self.num_motion_updates_
+    
 
 
 
@@ -189,8 +201,12 @@ class ParticleFilter:
         ####################
         ## YOUR CODE HERE ##
         ####################
-
-
+        # Calculate the sum of weights
+        total_weight = sum(p.weight for p in self.particles_)
+    
+        # Normalize particle weights
+        for p in self.particles_:
+            p.weight /= total_weight
 
 
 
@@ -248,8 +264,19 @@ class ParticleFilter:
         ####################
         ## YOUR CODE HERE ##
         ####################
-        
-
+        total_weight = sum(p.weight for p in self.particles_)
+        estimated_x = sum(p.x * p.weight for p in self.particles_) / total_weight
+        estimated_y = sum(p.y * p.weight for p in self.particles_) / total_weight
+    
+        # Calculate the average orientation using Cartesian coordinates
+        average_orientation_x = sum(math.cos(p.theta) * p.weight for p in self.particles_)
+        average_orientation_y = sum(math.sin(p.theta) * p.weight for p in self.particles_)
+        estimated_theta = math.atan2(average_orientation_y, average_orientation_x)
+    
+        # Update the estimated pose variables
+        self.estimated_pose_x = estimated_x
+        self.estimated_pose_y = estimated_y
+        self.estimated_pose_theta = wrap_angle(estimated_theta)
 
 
 
@@ -425,8 +452,33 @@ class ParticleFilter:
         ####################
         ## YOUR CODE HERE ##
         ####################
-        
-
+        # Calculate the distance moved since the previous odometry message
+        global_delta_x = odom_msg.pose.pose.position.x - self.prev_odom_msg_.pose.pose.position.x
+        global_delta_y = odom_msg.pose.pose.position.y - self.prev_odom_msg_.pose.pose.position.y
+        distance = math.sqrt(global_delta_x**2 + global_delta_y**2)
+    
+        # Calculate the previous robot orientation
+        prev_theta = 2 * math.acos(self.prev_odom_msg_.pose.pose.orientation.w)
+        if self.prev_odom_msg_.pose.pose.orientation.z < 0.:
+            prev_theta = -prev_theta
+    
+        # Determine if the direction is backward
+        if (prev_theta < 0. and global_delta_y > 0.) or (prev_theta > 0. and global_delta_y < 0.):
+            distance = -distance
+    
+        # Calculate the current orientation
+        theta = 2 * math.acos(odom_msg.pose.pose.orientation.w)
+        if odom_msg.pose.pose.orientation.z < 0.:
+            theta = -theta
+    
+        # Calculate the rotation since the previous odometry message
+        rotation = wrap_angle(theta - prev_theta)
+    
+        # Motion update: update particle positions based on motion equations
+        for p in self.particles_:
+            p.x += (distance + random_normal(self.motion_distance_noise_stddev_)) * math.cos(p.theta)
+            p.y += (distance + random_normal(self.motion_distance_noise_stddev_)) * math.sin(p.theta)
+            p.theta = wrap_angle(p.theta + rotation + random_normal(self.motion_rotation_noise_stddev_))
 
 
 
@@ -520,17 +572,61 @@ class ParticleFilter:
                 ####################
                 ## YOUR CODE HERE ##
                 ####################
+                # Calculate the step size for ray comparison
+                step = int(math.floor(float(len(scan_msg.ranges)) / self.num_scan_rays_))
+            
+                # Setup visualisation marker
+                self.marker_.points = []
+            
+                # Loop through particles
+                first_particle = True
+                for p in self.particles_:
+                    # Calculate the likelihood of the particle
+                    likelihood = 1.0
+            
+                    # Compare each scan ray
+                    for i in range(0, len(scan_msg.ranges), step):
+                        # Extract range value from the scan message
+                        scan_range = scan_msg.ranges[i]
+            
+                        # Calculate the angle of the ray in the frame of the robot
+                        local_angle = (scan_msg.angle_increment * i) + scan_msg.angle_min
+            
+                        # Calculate the angle of the ray in the map frame
+                        global_angle = wrap_angle(p.theta + local_angle)
+            
+                        # Calculate the expected range value for the particle
+                        particle_range = self.hit_scan(p.x, p.y, global_angle, 7.0, first_particle)
+            
+                        # Calculate the likelihood of the ray using Gaussian distribution
+                        likelihood *= math.exp(-(math.pow(scan_range - particle_range, 2)) / (2 * math.pow(self.sensing_noise_stddev_, 2)))
+            
+                        # Add the points for the debug marker
+                        if first_particle:
+                            point = Point(p.x, p.y, 0.)
+                            self.marker_.points.append(point)
+                            point = Point(particle_range * math.cos(global_angle) + p.x, particle_range * math.sin(global_angle) + p.y, 0.)
+                            self.marker_.points.append(point)
+            
+                    # Update particle weight with the likelihood
+                    p.weight *= likelihood
+            
+                    first_particle = False
+            
+                # Normalize particle weights
+                self.normalise_weights()
+            
+                # Estimate the pose of the robot
+                self.estimate_pose()                
 
-                
 
 
 
 
-
-            # Update the particle weight with the likelihood
-            p.weight *= likelihood
-
-            first_particle = False
+                # Update the particle weight with the likelihood
+                p.weight *= likelihood
+    
+                first_particle = False
 
         end = time.time()
 
@@ -571,7 +667,8 @@ class ParticleFilter:
         ## YOUR CODE HERE ##
         ####################
 
-
+        for particle in self.particles_:
+            particle.theta = wrap_angle(compass_measurement + random_normal(0, self.compass_noise_stddev_))
 
 
 
